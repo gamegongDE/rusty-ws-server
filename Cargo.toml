@@ -1,0 +1,32 @@
+[package]
+name = "rusty-ws-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tungstenite = "0.21.0"
+tokio-tungstenite = "0.21.0"
+tokio = { version = "1.32.0", features = ["io-std", "macros", "net", "rt-multi-thread", "time", "sync", "signal"] }
+tokio-stream = "0.1.14"
+
+futures = { version = "0.3.28", features = [] }
+futures-util = { version = "0.3.28", features = ["sink", "std"] }
+futures-channel = "0.3.28"
+
+url = "2.4.1"
+clap = { version = "4.4.5", features = ["derive"] }
+serde = { version = "1.0.188", features = ["derive"] }
+serde_json = "1.0.107"
+serde_with = { version = "3.3.0", features = ["json"] }
+
+time = { version = "0.3.29", features = ["formatting"] }
+uuid = { version = "1.4.1", features = ["v4"] }
+log = "0.4.20"
+env_logger = "0.11.3"
+warp = "0.3.5"
+reqwest = "0.12.4"
+rand = "0.8.5"
+chrono = "0.4.33"
+async-trait = "0.1.80"

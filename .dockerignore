@@ -1,0 +1,5 @@
+/target
+/.idea
+/.github
+.gitignore
+.dockerignore
