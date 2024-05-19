@@ -1,12 +1,11 @@
-use core::network::GameServer;
+use core::server::GameServer;
 use std::net::SocketAddr;
 
 use log::LevelFilter::Debug;
 use log::*;
 
-use crate::args::{Args, Parser};
+use crate::core::args::{Args, Parser};
 
-mod args;
 mod core;
 mod handler;
 mod system;

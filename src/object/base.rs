@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use log::info;
 use serde::{Deserialize, Serialize};
 
+use crate::core::server::{GameObjects, GameObjectsArc, Sessions, SessionsArc};
+
 use super::player::PlayerGameObject;
-use crate::server::{ClientMap, GameState};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GameObjectType {
@@ -23,7 +24,7 @@ impl Default for GameObjectType {
 #[async_trait]
 pub trait GameObjectTrait: Send + Sync {
     //fn update(&mut self, clients: SharedClients, state: SharedState) -> Result<(), String>;
-    async fn update(&mut self, clients: &mut ClientMap, state: &GameState, delta_time: f32) -> Result<(), String>;
+    async fn update(&mut self, sessions: &mut Sessions, objects: &tokio::sync::RwLockWriteGuard<'_, GameObjects>, delta_time: f32) -> Result<(), String>;
     fn get_alive(&self) -> bool;
     fn get_object_type(&self) -> GameObjectType;
     fn get_object(&mut self) -> &mut GameObject;
@@ -64,7 +65,7 @@ impl GameObject {
 
 #[async_trait]
 impl GameObjectTrait for GameObject {
-    async fn update(&mut self, _clients: &mut ClientMap, _state: &GameState, _delta_time: f32) -> Result<(), String> {
+    async fn update(&mut self, _sessions: &mut Sessions, _objects: &tokio::sync::RwLockWriteGuard<'_, GameObjects>, _delta_time: f32) -> Result<(), String> {
         // update game object
         info!("GameObject::update() called");
         Ok(())

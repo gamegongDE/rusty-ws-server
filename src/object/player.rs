@@ -1,6 +1,7 @@
 use async_trait::async_trait;
-use log::info;
 use serde::{Deserialize, Serialize};
+
+use crate::core::server::{GameObjects, GameObjectsArc, Sessions, SessionsArc};
 
 use super::base::{GameObject, GameObjectTrait};
 
@@ -33,7 +34,7 @@ impl PlayerGameObject {
 #[async_trait]
 impl GameObjectTrait for PlayerGameObject {
     #[allow(unused_variables)]
-    async fn update(&mut self, _clients: &mut ClientMap, _state: &GameState, delta_time: f32) -> Result<(), String> {
+    async fn update(&mut self, _sessions: &mut Sessions, _objects: &tokio::sync::RwLockWriteGuard<'_, GameObjects>, delta_time: f32) -> Result<(), String> {
         
 
         Ok(())

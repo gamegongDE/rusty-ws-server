@@ -1,15 +1,17 @@
-use crate::session::Session;
-use crate::map::GameMap;
+use crate::core::session::Session;
+use crate::handler::handler_echo::handle_echo;
+use crate::system::map::GameMap;
 use crate::msg::msg_in::MsgIn;
 use crate::object::base::GameObjectTrait;
-use crate::object::player::PlayerGameObject;
-use crate::update::UpdateThread;
 use futures::{join, StreamExt};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 use tokio::signal;
+use std::sync::atomic::AtomicU32;
+#[allow(unused_imports)]
 #[cfg(target_os = "windows")]
 use tokio::signal::windows::ctrl_c;
 use tokio::sync::{mpsc, watch, RwLock};
@@ -17,51 +19,42 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
 
-static NEXT_OBJECT_KEY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1000);
-pub type ClientMap = HashMap<u32, Session>;
-pub type SharedClients = Arc<RwLock<ClientMap>>;
-pub type SharedState = Arc<RwLock<GameState>>;
-pub type PlayerObjects = HashMap<u32, Arc<RwLock<PlayerGameObject>>>;
+pub type Sessions = HashMap<u32, Session>;
+pub type SessionsArc = Arc<RwLock<Sessions>>;
 pub type GameObjects = HashMap<u32, Arc<RwLock<Box<dyn GameObjectTrait>>>>;
+pub type GameObjectsArc = Arc<RwLock<GameObjects>>;
+pub type GameMapArc = Arc<RwLock<GameMap>>;
 
 #[allow(dead_code)]
-pub struct GameState {
-    pub timestamp_game_start: u64,
-    pub game_map: GameMap,
-    pub player_objects: PlayerObjects,
-    pub game_objects: GameObjects,
-}
-
-impl GameState {
-    fn new(current_timestamp: u64) -> Self {
-        Self {
-            timestamp_game_start: current_timestamp,
-            game_map: GameMap::new(),
-            player_objects: HashMap::new(),
-            game_objects: HashMap::new(),
-        }
-    }
-}
-
 #[derive(Clone)]
-#[allow(dead_code)]
 pub(crate) struct GameServer {
     listen_address: SocketAddr,
-    clients: SharedClients,
-    state: SharedState,
     timestamp_server_start: u64,
+    sessions: SessionsArc,
+    
+    game_objects: GameObjectsArc,
+    game_map: GameMapArc,
+
+    next_session_key: Arc<AtomicU32>,
+    next_object_key: u32,
 }
 
 impl GameServer {
     pub async fn new(addr: SocketAddr) -> Result<Self, std::io::Error> {
         let listen_address = addr;
-        let clients = SharedClients::default();
-        let state = GameState::new(tokio::time::Instant::now().elapsed().as_millis() as u64);
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let game_objects = Arc::new(RwLock::new(HashMap::new()));
+        let game_map = Arc::new(RwLock::new(GameMap::new()));
+        let next_session_key = Arc::new(AtomicU32::new(1000));
+        let next_object_key = 1000000;
         Ok(Self {
             listen_address,
-            clients,
             timestamp_server_start: 0,
-            state: Arc::new(RwLock::new(state)),
+            sessions,
+            game_objects,
+            game_map,
+            next_session_key,
+            next_object_key,
         })
     }
 
@@ -71,8 +64,10 @@ impl GameServer {
             self.listen_address
         );
 
-        let clients = self.clients.clone();
-        let clients = warp::any().map(move || clients.clone());
+        let sessions_clone = self.sessions.clone();
+        let session_warp = warp::any().map(move || sessions_clone.clone());
+        let session_key_clone = self.next_session_key.clone();
+        let session_key_warp = warp::any().map(move || session_key_clone.clone());
 
         let command_handler = warp::path("command").map(|| "de game command handler");
 
@@ -89,9 +84,10 @@ impl GameServer {
         let ws = warp::path("ws")
             .and(warp::ws())
             .and(warp::addr::remote())
-            .and(clients)
-            .map(|ws: warp::ws::Ws, addr: Option<SocketAddr>, clients| {
-                ws.on_upgrade(move |socket| Self::handle_connection(socket, addr, clients))
+            .and(session_warp)
+            .and(session_key_warp)
+            .map(|ws: warp::ws::Ws, addr: Option<SocketAddr>, sessions, next_session_key| {
+                ws.on_upgrade(move |socket| Self::handle_connection(socket, addr, sessions, next_session_key))
             });
 
         let routes = ws.or(command_handler).or(intro);
@@ -110,31 +106,59 @@ impl GameServer {
         // 웹소켓 서버를 시작합니다.
         let tokio_server_handler = tokio::spawn(server);
 
-        // 로직 스레드를 실행합니다.
-
-        let copied_state = self.state.clone();
-        let copied_clients = self.clients.clone();
+        // 로직 루프를 실행합니다.
+        let mut last_update = tokio::time::Instant::now();
+        let mut last_fps = 0;
+        let mut last_fps_checked = tokio::time::Instant::now();
+        let target_fps = 60.0;
+        let mut next_target_frame_time = tokio::time::Instant::now() + Duration::from_secs_f32(1.0 / target_fps);
+        
         let copied_terminate_receiver = terminate_receiver.clone();
-        let update_thread_handler = tokio::spawn(async move {
-            let mut update_thread = UpdateThread::new(copied_clients, copied_state);
-            let _ = update_thread.run(copied_terminate_receiver).await;
-            info!("update thread ended");
-        });
+        loop {
+            let now = tokio::time::Instant::now();
+            let delta_time = now.duration_since(last_update).as_secs_f32();
+            last_update = now;
 
-        let (_, _) = join!(tokio_server_handler, update_thread_handler);
+            self.update(delta_time).await;
+
+            last_fps += 1;
+            
+            if last_fps_checked.elapsed().as_millis() >= 1000 {
+                last_fps_checked = now;
+                debug!("FPS: {}", last_fps);
+                last_fps = 0;
+            }
+
+            if *copied_terminate_receiver.borrow() {
+                info!("Terminate signal received");
+                break;
+            }
+
+            let sleep_time = next_target_frame_time.duration_since(now);
+            if sleep_time.as_secs_f32() > 0.0 {
+                tokio::time::sleep(sleep_time).await;
+            }
+            next_target_frame_time = next_target_frame_time + Duration::from_secs_f32(1.0 / target_fps);
+        }
+
+        let _ = join!(tokio_server_handler);
 
         info!("Finished server at {}!", self.listen_address);
 
         Ok(())
     }
 
+    /**
+     * handle new websocket connection
+     */
     pub async fn handle_connection(
         ws: WebSocket,
         addr: Option<SocketAddr>,
-        clients: SharedClients,
+        sessions: SessionsArc,
+        session_key: Arc<AtomicU32>,
     ) {
-        let new_user_key = NEXT_OBJECT_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        info!("Welcome #{}, from {}", new_user_key, addr.unwrap());
+        let session_key = session_key.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        info!("Welcome #{}, from {}", session_key, addr.unwrap());
 
         let (user_tx, mut user_rx) = ws.split();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -143,25 +167,24 @@ impl GameServer {
 
         tokio::spawn(rx.forward(user_tx));
 
-        let client = Session {
-            key: new_user_key,
+        let session = Session {
+            key: session_key,
             address: addr,
             session: "".to_string(),
             channel: tx,
             message_inbound: VecDeque::new(),
             message_outbound: VecDeque::new(),
-            id: new_user_key,
-            alive: true,
+            id: 0, // unauthorized now
         };
 
         debug!("RWLOCK clients at handle_connection");
-        clients.write().await.insert(new_user_key, client);
+        sessions.write().await.insert(session_key, session);
         debug!("RWLOCK clients at handle_connection OK");
 
         while let Some(result) = user_rx.next().await {
             let _ = match result {
                 Ok(msg) => {
-                    Self::handle_message(new_user_key, msg, clients.clone()).await;
+                    Self::handle_message(session_key, msg, sessions.clone()).await;
                 }
                 Err(e) => {
                     warn!("Error receiving message: {}", e);
@@ -170,10 +193,10 @@ impl GameServer {
             };
         }
 
-        Self::disconnect(new_user_key, clients.clone()).await;
+        Self::handle_disconnect(session_key, sessions.clone()).await;
     }
 
-    pub async fn handle_message(client_key: u32, message: Message, clients: SharedClients) {
+    pub async fn handle_message(session_key: u32, message: Message, sessions: SessionsArc) {
         if !message.is_text() {
             return;
         }
@@ -185,40 +208,120 @@ impl GameServer {
         let message = message_parse.unwrap();
         debug!("Message: {:?}", message);
 
-        // find client by key
-        debug!("RWLOCK clients at handle_message");
-        let mut clients_writelock = clients.write().await;
-        debug!("RWLOCK clients at handle_message OK");
+        // find sessions by key
+        let mut sessions_writelock = sessions.write().await;
         {
-            let client = clients_writelock.get_mut(&client_key);
-            if client.is_none() {
-                warn!("Client not found: {}", client_key);
+            let sessions = sessions_writelock.get_mut(&session_key);
+            if sessions.is_none() {
+                warn!("Session not found: {}", session_key);
                 return;
             }
 
-            // add message in client inbound message list
-            client.unwrap().message_inbound.push_back(message.clone());
+            // add message in session inbound message list
+            sessions.unwrap().message_inbound.push_back(message.clone());
         }
-        drop(clients_writelock);
+        drop(sessions_writelock);
     }
 
-    pub async fn disconnect(client_key: u32, clients: SharedClients) {
-        info!("Bye #{}", client_key);
+    pub async fn handle_disconnect(session_key: u32, sessions: SessionsArc) {
+        info!("Bye #{}", session_key);
 
-        debug!("RWLOCK clients at disconnect");
-        let mut clients_write_lock = clients.write().await;
-        debug!("RWLOCK clients at disconnect OK");
-        let client = clients_write_lock.get_mut(&client_key);
-        if client.is_none() {
-            warn!("Client not found: {}", client_key);
+        let mut sessions_writelock = sessions.write().await;
+        let session = sessions_writelock.get_mut(&session_key);
+        if session.is_none() {
+            warn!("Session not found: {}", session_key);
             return;
         }
 
-        let client = client.unwrap();
-        client.message_inbound.clear();
-        client.message_outbound.clear();
-        client.alive = false;
-        info!("Client #{} is disconnected", client_key);
+        let session = session.unwrap();
+        session.message_inbound.clear();
+        session.message_outbound.clear();
+        sessions_writelock.remove(&session_key);
+
+        info!("Session #{} is disconnected", session_key);
+    }
+
+    async fn update(&self, delta_time: f32) {
+        // info!("update");
+
+        let mut sessions_writelock = self.sessions.write().await;
+        let mut objects_writelock = self.game_objects.write().await;
+
+        // 1단계: 메시지 수집
+        let mut messages_to_process: HashMap<u32, Vec<MsgIn>> = HashMap::new();
+
+        // 클라이언트를 순회하며 살아있는 클라이언트의 메시지 처리
+        for (session_key, session) in sessions_writelock.iter_mut() {
+            while let Some(message) = session.message_inbound.pop_front() {
+                messages_to_process
+                    .entry(*session_key)
+                    .or_insert(Vec::new())
+                    .push(message);
+            }
+        }
+
+        // 1-1단계: 메시지 처리
+        for (session_key, messages) in messages_to_process.iter() {
+            for message in messages.iter() {
+                self.process_message(
+                    message.clone(),
+                    *session_key,
+                    &mut sessions_writelock,
+                    &mut objects_writelock,
+                )
+                .await;
+            }
+        }
+
+        // 2단계: 게임 로직 처리
+        // state_writelock 의 game_objects 를 순회하면서 update 함수를 호출한다
+        for (_key, game_object) in objects_writelock.iter() {
+            let mut write_lock = game_object.write().await;
+
+            let _result = write_lock
+                .update(&mut sessions_writelock, &objects_writelock, delta_time).await;
+        }
+
+        // 3단계: 메시지 전송
+        for (_, session) in sessions_writelock.iter_mut() {
+            for message in session.message_outbound.drain(..) {
+                let message_json =
+                    serde_json::to_string(&message).expect("Failed to serialize message");
+                session
+                    .channel
+                    .send(Ok(Message::text(message_json)))
+                    .expect("Failed to send message");
+            }
+        }
+
+        drop(objects_writelock);
+        drop(sessions_writelock);
+    }
+
+    pub async fn process_message(
+        &self,
+        message: MsgIn,
+        session_key: u32,
+        mut sessions_writelock: &mut tokio::sync::RwLockWriteGuard<'_, Sessions>,
+        mut objects_writelock: &mut tokio::sync::RwLockWriteGuard<'_, GameObjects>,
+    ) {
+        match message {
+            MsgIn::Echo(data) => {
+                let handle_result = handle_echo(
+                    &data,
+                    session_key,
+                    &mut sessions_writelock,
+                    &mut objects_writelock,
+                )
+                .await;
+                match handle_result {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Error handling message: {}", e);
+                    }
+                }
+            }
+        }
     }
 
     async fn shutdown_signal(terminate_sender: watch::Sender<bool>) {
