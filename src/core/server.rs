@@ -14,12 +14,12 @@ use std::sync::atomic::AtomicU32;
 #[allow(unused_imports)]
 #[cfg(target_os = "windows")]
 use tokio::signal::windows::ctrl_c;
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch, RwLock, RwLockWriteGuard};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
 
-pub type Sessions = HashMap<u32, Session>;
+pub type Sessions = HashMap<u32, Arc<RwLock<Session>>>;
 pub type SessionsArc = Arc<RwLock<Sessions>>;
 pub type GameObjects = HashMap<u32, Arc<RwLock<Box<dyn GameObjectTrait>>>>;
 pub type GameObjectsArc = Arc<RwLock<GameObjects>>;
@@ -174,12 +174,15 @@ impl GameServer {
             channel: tx,
             message_inbound: VecDeque::new(),
             message_outbound: VecDeque::new(),
-            id: 0, // unauthorized now
+            user_index: None,        // unauthorized now
+            user_access_token: None, // unauthorized now
+            player_object_key: None, // no player object now
         };
 
-        debug!("RWLOCK clients at handle_connection");
-        sessions.write().await.insert(session_key, session);
-        debug!("RWLOCK clients at handle_connection OK");
+        sessions
+            .write()
+            .await
+            .insert(session_key, Arc::new(RwLock::new(session)));
 
         while let Some(result) = user_rx.next().await {
             let _ = match result {
@@ -209,16 +212,17 @@ impl GameServer {
         debug!("Message: {:?}", message);
 
         // find sessions by key
-        let mut sessions_writelock = sessions.write().await;
+        let sessions_writelock = sessions.write().await;
         {
-            let sessions = sessions_writelock.get_mut(&session_key);
-            if sessions.is_none() {
+            let session = sessions_writelock.get(&session_key);
+            if session.is_none() {
                 warn!("Session not found: {}", session_key);
                 return;
             }
+            let mut session = session.unwrap().write().await;
 
             // add message in session inbound message list
-            sessions.unwrap().message_inbound.push_back(message.clone());
+            session.message_inbound.push_back(message.clone());
         }
         drop(sessions_writelock);
     }
@@ -233,9 +237,11 @@ impl GameServer {
             return;
         }
 
-        let session = session.unwrap();
+        let mut session = session.unwrap().write().await;
         session.message_inbound.clear();
         session.message_outbound.clear();
+        drop(session);
+
         sessions_writelock.remove(&session_key);
 
         info!("Session #{} is disconnected", session_key);
@@ -251,7 +257,8 @@ impl GameServer {
         let mut messages_to_process: HashMap<u32, Vec<MsgIn>> = HashMap::new();
 
         // 클라이언트를 순회하며 살아있는 클라이언트의 메시지 처리
-        for (session_key, session) in sessions_writelock.iter_mut() {
+        for (session_key, session) in sessions_writelock.iter() {
+            let mut session = session.write().await;
             while let Some(message) = session.message_inbound.pop_front() {
                 messages_to_process
                     .entry(*session_key)
@@ -284,12 +291,16 @@ impl GameServer {
 
         // 3단계: 메시지 전송
         for (_, session) in sessions_writelock.iter_mut() {
-            for message in session.message_outbound.drain(..) {
+            let session_arc = Arc::clone(session);
+            let mut session: RwLockWriteGuard<Session> = session_arc.write().await;
+            
+            while let Some(message) = session.message_outbound.pop_front() {
                 let message_json =
                     serde_json::to_string(&message).expect("Failed to serialize message");
-                session
+
+                let _ = &session
                     .channel
-                    .send(Ok(Message::text(message_json)))
+                    .send(Ok(warp::ws::Message::text(message_json)))
                     .expect("Failed to send message");
             }
         }

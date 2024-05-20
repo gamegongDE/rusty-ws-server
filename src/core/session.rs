@@ -12,7 +12,9 @@ pub struct Session {
     pub(crate) channel: mpsc::UnboundedSender<Result<Message, warp::Error>>,
     pub(crate) message_inbound: VecDeque<MsgIn>,
     pub(crate) message_outbound: VecDeque<MsgOut>,
-    pub(crate) id: u32,
+    pub(crate) user_index: Option<u32>,
+    pub(crate) user_access_token: Option<String>,
+    pub(crate) player_object_key: Option<u32>,
 }
 
 impl Session {

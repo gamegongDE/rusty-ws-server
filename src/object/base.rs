@@ -1,18 +1,18 @@
+use std::{collections::HashMap, sync::Arc};
+
 use async_trait::async_trait;
 use log::info;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{RwLock, RwLockWriteGuard};
 
-use crate::core::server::{GameObjects, GameObjectsArc, Sessions, SessionsArc};
+use crate::core::session::Session;
 
 use super::player::PlayerGameObject;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GameObjectType {
     None,
-    Player,
-    AI,
-    Bullet,
-    Item,
+    Player
 }
 
 impl Default for GameObjectType {
@@ -21,11 +21,15 @@ impl Default for GameObjectType {
     }
 }
 
+#[allow(dead_code)]
 #[async_trait]
 pub trait GameObjectTrait: Send + Sync {
-    //fn update(&mut self, clients: SharedClients, state: SharedState) -> Result<(), String>;
-    async fn update(&mut self, sessions: &mut Sessions, objects: &tokio::sync::RwLockWriteGuard<'_, GameObjects>, delta_time: f32) -> Result<(), String>;
-    fn get_alive(&self) -> bool;
+    async fn update(
+        &mut self,
+        sessions: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Session>>>>,
+        objects: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Box<dyn GameObjectTrait>>>>>,
+        delta_time: f32,
+    ) -> Result<(), String>;    fn get_alive(&self) -> bool;
     fn get_object_type(&self) -> GameObjectType;
     fn get_object(&mut self) -> &mut GameObject;
     fn get_object_as_player(&mut self) -> Option<&mut PlayerGameObject>;
@@ -63,9 +67,21 @@ impl GameObject {
     }
 }
 
+#[allow(unused_variables)]
 #[async_trait]
 impl GameObjectTrait for GameObject {
-    async fn update(&mut self, _sessions: &mut Sessions, _objects: &tokio::sync::RwLockWriteGuard<'_, GameObjects>, _delta_time: f32) -> Result<(), String> {
+    async fn update(
+        &mut self,
+        sessions: &'life1 tokio::sync::RwLockWriteGuard<
+            '_,
+            HashMap<u32, Arc<tokio::sync::RwLock<Session>>>,
+        >,
+        objects: &'life2 tokio::sync::RwLockWriteGuard<
+            '_,
+            HashMap<u32, Arc<tokio::sync::RwLock<Box<(dyn GameObjectTrait + 'static)>>>>,
+        >,
+        delta_time: f32,
+    ) -> Result<(), String> {
         // update game object
         info!("GameObject::update() called");
         Ok(())

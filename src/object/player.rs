@@ -1,7 +1,10 @@
+use std::{collections::HashMap, sync::Arc};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{RwLock, RwLockWriteGuard};
 
-use crate::core::server::{GameObjects, GameObjectsArc, Sessions, SessionsArc};
+use crate::core::session::Session;
 
 use super::base::{GameObject, GameObjectTrait};
 
@@ -31,10 +34,15 @@ impl PlayerGameObject {
     }
 }
 
+#[allow(unused_variables)]
 #[async_trait]
 impl GameObjectTrait for PlayerGameObject {
-    #[allow(unused_variables)]
-    async fn update(&mut self, _sessions: &mut Sessions, _objects: &tokio::sync::RwLockWriteGuard<'_, GameObjects>, delta_time: f32) -> Result<(), String> {
+    async fn update(
+        &mut self,
+        sessions: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Session>>>>,
+        objects: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Box<dyn GameObjectTrait>>>>>,
+        delta_time: f32,
+    ) -> Result<(), String> {
         
 
         Ok(())
