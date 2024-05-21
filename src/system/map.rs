@@ -1,3 +1,6 @@
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -28,11 +31,7 @@ pub struct GameTile {
 
 #[allow(dead_code)]
 impl GameTile {
-    pub fn new(
-        pos_x: u32,
-        pos_y: u32,
-        tile_type: GameTileType,
-    ) -> GameTile {
+    pub fn new(pos_x: u32, pos_y: u32, tile_type: GameTileType) -> GameTile {
         GameTile {
             pos_x,
             pos_y,
@@ -83,9 +82,7 @@ impl GameTileType {
 #[allow(dead_code)]
 impl GameMap {
     pub fn new() -> GameMap {
-        GameMap {
-            tiles: Vec::new()
-        }
+        GameMap { tiles: Vec::new() }
     }
 
     pub fn get_tile(&self, x: u32, y: u32) -> &GameTile {

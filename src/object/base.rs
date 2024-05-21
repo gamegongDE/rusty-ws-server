@@ -1,7 +1,9 @@
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
+
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
@@ -12,12 +14,38 @@ use super::player::PlayerGameObject;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GameObjectType {
     None,
-    Player
+    Player,
 }
 
 impl Default for GameObjectType {
     fn default() -> Self {
         GameObjectType::None
+    }
+}
+
+pub struct GameObjectUpdateResult {
+    pub success: bool,
+    pub new_objects: Option<Vec<Arc<RwLock<Box<dyn GameObjectTrait>>>>>,
+}
+
+#[allow(dead_code)]
+impl GameObjectUpdateResult {
+    pub const SUCCESS: Self = GameObjectUpdateResult {
+        success: true,
+        new_objects: None,
+    };
+
+    pub const FAILURE: Self = GameObjectUpdateResult {
+        success: false,
+        new_objects: None,
+    };
+
+    pub fn with_new_objects(
+        mut self,
+        new_objects: Vec<Arc<RwLock<Box<dyn GameObjectTrait>>>>,
+    ) -> Self {
+        self.new_objects = Some(new_objects);
+        self
     }
 }
 
@@ -29,7 +57,8 @@ pub trait GameObjectTrait: Send + Sync {
         sessions: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Session>>>>,
         objects: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Box<dyn GameObjectTrait>>>>>,
         delta_time: f32,
-    ) -> Result<(), String>;    fn get_alive(&self) -> bool;
+    ) -> Result<GameObjectUpdateResult, String>;
+    fn get_alive(&self) -> bool;
     fn get_object_type(&self) -> GameObjectType;
     fn get_object(&mut self) -> &mut GameObject;
     fn get_object_as_player(&mut self) -> Option<&mut PlayerGameObject>;
@@ -81,10 +110,8 @@ impl GameObjectTrait for GameObject {
             HashMap<u32, Arc<tokio::sync::RwLock<Box<(dyn GameObjectTrait + 'static)>>>>,
         >,
         delta_time: f32,
-    ) -> Result<(), String> {
-        // update game object
-        info!("GameObject::update() called");
-        Ok(())
+    ) -> Result<GameObjectUpdateResult, String> {
+        Ok(GameObjectUpdateResult::SUCCESS)
     }
 
     fn get_alive(&self) -> bool {

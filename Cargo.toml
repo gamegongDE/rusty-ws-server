@@ -1,6 +1,6 @@
 [package]
 name = "rusty-ws-server"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -30,3 +30,4 @@ reqwest = "0.12.4"
 rand = "0.8.5"
 chrono = "0.4.33"
 async-trait = "0.1.80"
+num_cpus = "1.0"

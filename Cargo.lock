@@ -1323,7 +1323,7 @@ checksum = "976295e77ce332211c0d24d92c0e83e50f5c5f046d11082cea19f3df13a3562d"
 
 [[package]]
 name = "rusty-ws-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1333,6 +1333,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "log",
+ "num_cpus",
  "rand",
  "reqwest",
  "serde",

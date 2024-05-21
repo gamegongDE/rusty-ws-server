@@ -1,21 +1,23 @@
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
+use tungstenite::protocol;
+
 use crate::core::session::Session;
 use crate::handler::handler_echo::handle_echo;
-use crate::system::map::GameMap;
 use crate::msg::msg_in::MsgIn;
 use crate::object::base::GameObjectTrait;
-use futures::{join, StreamExt};
-use log::{debug, error, info, warn};
+use crate::system::map::GameMap;
+use futures::{join, FutureExt, SinkExt, StreamExt};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 use tokio::signal;
-use std::sync::atomic::AtomicU32;
 #[allow(unused_imports)]
 #[cfg(target_os = "windows")]
 use tokio::signal::windows::ctrl_c;
-use tokio::sync::{mpsc, watch, RwLock, RwLockWriteGuard};
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio::sync::{watch, RwLock};
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
 
@@ -30,8 +32,9 @@ pub type GameMapArc = Arc<RwLock<GameMap>>;
 pub(crate) struct GameServer {
     listen_address: SocketAddr,
     timestamp_server_start: u64,
+    timestamp_server_end: u64,
     sessions: SessionsArc,
-    
+
     game_objects: GameObjectsArc,
     game_map: GameMapArc,
 
@@ -50,6 +53,7 @@ impl GameServer {
         Ok(Self {
             listen_address,
             timestamp_server_start: 0,
+            timestamp_server_end: 0,
             sessions,
             game_objects,
             game_map,
@@ -59,10 +63,55 @@ impl GameServer {
     }
 
     pub async fn run(&mut self) -> Result<(), String> {
+        let total_thread_cnt = num_cpus::get();
+        let logic_thread_cnt = 1;
+        let network_task_cnt = {
+            let calculated_cnt = total_thread_cnt - 4;
+            let adjusted_cnt = calculated_cnt - (calculated_cnt % 4);
+            if adjusted_cnt < 1 {
+                1
+            } else if adjusted_cnt > 16 {
+                16
+            } else {
+                adjusted_cnt
+            }
+        };
+
         info!(
             "Game WebSocket server listening on: {}",
             self.listen_address
         );
+        info!("Total thread count: {}", total_thread_cnt);
+        info!("Logic thread count: {}", logic_thread_cnt);
+        info!("Network task count: {}", network_task_cnt);
+
+        let (terminate_sender, terminate_receiver) = watch::channel(false);
+        // shutdown_signal 태스크를 생성합니다.
+        let _ = tokio::spawn(async {
+            Self::shutdown_signal(terminate_sender).await;
+        });
+
+        // network task 를 생성합니다.
+        let mut fps_receivers = Vec::new();
+
+        for i in 0..network_task_cnt {
+            let copied_terminate_receiver = terminate_receiver.clone();
+            let copied_sessions = self.sessions.clone();
+            let worker_index = i;
+            let worker_count = network_task_cnt;
+            let (fps_sender_task, fps_receiver_task) = watch::channel(0);
+            fps_receivers.push(fps_receiver_task);
+            let _ = tokio::spawn(async move {
+                Self::process_network(
+                    copied_sessions,
+                    worker_index,
+                    worker_count,
+                    copied_terminate_receiver,
+                    fps_sender_task,
+                )
+                .await;
+            });
+        }
 
         let sessions_clone = self.sessions.clone();
         let session_warp = warp::any().map(move || sessions_clone.clone());
@@ -73,22 +122,19 @@ impl GameServer {
 
         let intro = warp::path::end().map(|| "de game server");
 
-        let (terminate_sender, terminate_receiver) = watch::channel(false);
-        // shutdown_signal 태스크를 생성합니다.
-        let _ = tokio::spawn(async {
-            info!("listening to shutdown signal...");
-            Self::shutdown_signal(terminate_sender).await;
-        });
-
         // GET /ws
         let ws = warp::path("ws")
             .and(warp::ws())
             .and(warp::addr::remote())
             .and(session_warp)
             .and(session_key_warp)
-            .map(|ws: warp::ws::Ws, addr: Option<SocketAddr>, sessions, next_session_key| {
-                ws.on_upgrade(move |socket| Self::handle_connection(socket, addr, sessions, next_session_key))
-            });
+            .map(
+                |ws: warp::ws::Ws, addr: Option<SocketAddr>, sessions, next_session_key| {
+                    ws.on_upgrade(move |socket| {
+                        Self::handle_connection(socket, addr, sessions, next_session_key)
+                    })
+                },
+            );
 
         let routes = ws.or(command_handler).or(intro);
 
@@ -96,12 +142,10 @@ impl GameServer {
         let (_, server) =
             warp::serve(routes).bind_with_graceful_shutdown(self.listen_address, async move {
                 copied_terminate_receiver.changed().await.unwrap();
-                info!("Shutting down server...");
             });
 
         self.timestamp_server_start = chrono::Utc::now().timestamp_millis() as u64;
-        info!("Running server at {}!", self.listen_address);
-        info!("current timestamp: {}", self.timestamp_server_start);
+        warn!("Server started at {}", self.timestamp_server_start);
 
         // 웹소켓 서버를 시작합니다.
         let tokio_server_handler = tokio::spawn(server);
@@ -111,26 +155,37 @@ impl GameServer {
         let mut last_fps = 0;
         let mut last_fps_checked = tokio::time::Instant::now();
         let target_fps = 60.0;
-        let mut next_target_frame_time = tokio::time::Instant::now() + Duration::from_secs_f32(1.0 / target_fps);
-        
+        let mut next_target_frame_time =
+            tokio::time::Instant::now() + Duration::from_secs_f32(1.0 / target_fps);
+
         let copied_terminate_receiver = terminate_receiver.clone();
         loop {
             let now = tokio::time::Instant::now();
             let delta_time = now.duration_since(last_update).as_secs_f32();
             last_update = now;
 
-            self.update(delta_time).await;
+            self.process_update(delta_time).await;
 
             last_fps += 1;
-            
+
+            // 평균 FPS 계산
+            let mut total_fps = 0;
+            for fps_receiver in &fps_receivers {
+                total_fps += *fps_receiver.borrow();
+            }
+            let last_network_average_fps = total_fps / network_task_cnt;
+
             if last_fps_checked.elapsed().as_millis() >= 1000 {
                 last_fps_checked = now;
-                debug!("FPS: {}", last_fps);
+                debug!(
+                    "FPS: (logic) {} (network) {}",
+                    last_fps, last_network_average_fps
+                );
                 last_fps = 0;
             }
 
             if *copied_terminate_receiver.borrow() {
-                info!("Terminate signal received");
+                warn!("Terminate signal received");
                 break;
             }
 
@@ -138,12 +193,14 @@ impl GameServer {
             if sleep_time.as_secs_f32() > 0.0 {
                 tokio::time::sleep(sleep_time).await;
             }
-            next_target_frame_time = next_target_frame_time + Duration::from_secs_f32(1.0 / target_fps);
+            next_target_frame_time =
+                next_target_frame_time + Duration::from_secs_f32(1.0 / target_fps);
         }
 
         let _ = join!(tokio_server_handler);
 
-        info!("Finished server at {}!", self.listen_address);
+        self.timestamp_server_end = chrono::Utc::now().timestamp_millis() as u64;
+        warn!("Server finished at {}", self.timestamp_server_end);
 
         Ok(())
     }
@@ -151,6 +208,7 @@ impl GameServer {
     /**
      * handle new websocket connection
      */
+    #[allow(unused_variables)]
     pub async fn handle_connection(
         ws: WebSocket,
         addr: Option<SocketAddr>,
@@ -158,20 +216,21 @@ impl GameServer {
         session_key: Arc<AtomicU32>,
     ) {
         let session_key = session_key.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        info!("Welcome #{}, from {}", session_key, addr.unwrap());
+        debug!(
+            "Session #{} connected (from {})",
+            session_key,
+            addr.unwrap()
+        );
 
-        let (user_tx, mut user_rx) = ws.split();
-        let (tx, rx) = mpsc::unbounded_channel();
-
-        let rx = UnboundedReceiverStream::new(rx);
-
-        tokio::spawn(rx.forward(user_tx));
+        let (user_tx, user_rx) = ws.split();
 
         let session = Session {
+            alive: true,
             key: session_key,
             address: addr,
             session: "".to_string(),
-            channel: tx,
+            channel_send: user_tx,
+            channel_recv: user_rx,
             message_inbound: VecDeque::new(),
             message_outbound: VecDeque::new(),
             user_index: None,        // unauthorized now
@@ -183,55 +242,107 @@ impl GameServer {
             .write()
             .await
             .insert(session_key, Arc::new(RwLock::new(session)));
-
-        while let Some(result) = user_rx.next().await {
-            let _ = match result {
-                Ok(msg) => {
-                    Self::handle_message(session_key, msg, sessions.clone()).await;
-                }
-                Err(e) => {
-                    warn!("Error receiving message: {}", e);
-                    break;
-                }
-            };
-        }
-
-        Self::handle_disconnect(session_key, sessions.clone()).await;
     }
 
-    pub async fn handle_message(session_key: u32, message: Message, sessions: SessionsArc) {
-        if !message.is_text() {
-            return;
-        }
-        let message_parse: Result<MsgIn, _> = serde_json::from_str(message.to_str().unwrap());
-        if message_parse.is_err() {
-            warn!("Message is not valid json : {}", message.to_str().unwrap());
-            return;
-        }
-        let message = message_parse.unwrap();
-        debug!("Message: {:?}", message);
+    pub async fn process_network(
+        sessions: SessionsArc,
+        worker_index: usize,
+        worker_count: usize,
+        terminate_receiver: watch::Receiver<bool>,
+        fps_sender: watch::Sender<usize>,
+    ) {
+        let mut last_fps_checked = tokio::time::Instant::now();
+        let mut frame_count = 0;
 
-        // find sessions by key
-        let sessions_writelock = sessions.write().await;
-        {
-            let session = sessions_writelock.get(&session_key);
-            if session.is_none() {
-                warn!("Session not found: {}", session_key);
-                return;
+        loop {
+            if *terminate_receiver.borrow() {
+                break;
             }
-            let mut session = session.unwrap().write().await;
+            let sessions_readlock = sessions.read().await;
 
-            // add message in session inbound message list
-            session.message_inbound.push_back(message.clone());
+            for (session_key, session) in sessions_readlock.iter() {
+                if session_key % worker_count as u32 != worker_index as u32 {
+                    continue;
+                }
+                let mut session = session.write().await;
+
+                loop {
+                    let recv_msg = session.channel_recv.next().now_or_never();
+                    if recv_msg.is_none() {
+                        break;
+                    }
+                    let recv_msg = recv_msg.unwrap();
+                    if recv_msg.is_none() {
+                        break;
+                    }
+                    let recv_msg = recv_msg.unwrap();
+                    match recv_msg {
+                        Ok(message) => {
+                            if message.is_close() {
+                                session.alive = false;
+                                break;
+                            }
+                            if !message.is_text() {
+                                return;
+                            }
+
+                            let message_parse: Result<MsgIn, _> =
+                                serde_json::from_str(message.to_str().unwrap());
+                            if message_parse.is_err() {
+                                warn!("Message parse error : {}", message.to_str().unwrap());
+                                return;
+                            }
+                            let message = message_parse.unwrap();
+                            debug!("Message: {:?}", message);
+
+                            session.message_inbound.push_back(message);
+                        }
+                        Err(err) => {
+                            warn!("Error receiving message: {}", err);
+                            session.alive = false;
+                            break;
+                        }
+                    }
+                }
+
+                let mut sending_messages = vec![];
+                for message in session.message_outbound.drain(..) {
+                    let message_json = serde_json::to_string(&message);
+                    if message_json.is_err() {
+                        warn!("Failed to serialize message: {:?}", message);
+                        continue;
+                    }
+                    sending_messages.push(message_json.unwrap());
+                }
+
+                for message in sending_messages.iter() {
+                    let _ = session.channel_send.send(Message::text(message)).await;
+                }
+            }
+
+            drop(sessions_readlock);
+
+            frame_count += 1;
+
+            let now = tokio::time::Instant::now();
+            if now.duration_since(last_fps_checked).as_secs() >= 1 {
+                let _ = fps_sender.send(frame_count);
+                frame_count = 0;
+                last_fps_checked = now;
+            }
         }
-        drop(sessions_writelock);
     }
 
-    pub async fn handle_disconnect(session_key: u32, sessions: SessionsArc) {
-        info!("Bye #{}", session_key);
+    pub async fn handle_disconnect(
+        session_key: u32,
+        sessions_guard: &mut tokio::sync::RwLockWriteGuard<
+            '_,
+            HashMap<u32, Arc<tokio::sync::RwLock<Session>>>,
+        >,
+    ) {
+        debug!("Session #{} is disconnected", session_key);
 
-        let mut sessions_writelock = sessions.write().await;
-        let session = sessions_writelock.get_mut(&session_key);
+        let session = sessions_guard.get_mut(&session_key);
         if session.is_none() {
             warn!("Session not found: {}", session_key);
             return;
@@ -242,14 +353,10 @@ impl GameServer {
         session.message_outbound.clear();
         drop(session);
 
-        sessions_writelock.remove(&session_key);
-
-        info!("Session #{} is disconnected", session_key);
+        sessions_guard.remove(&session_key);
     }
 
-    async fn update(&self, delta_time: f32) {
-        // info!("update");
-
+    async fn process_update(&self, delta_time: f32) {
         let mut sessions_writelock = self.sessions.write().await;
         let mut objects_writelock = self.game_objects.write().await;
 
@@ -286,23 +393,20 @@ impl GameServer {
             let mut write_lock = game_object.write().await;
 
             let _result = write_lock
-                .update(&mut sessions_writelock, &objects_writelock, delta_time).await;
+                .update(&mut sessions_writelock, &objects_writelock, delta_time)
+                .await;
         }
 
-        // 3단계: 메시지 전송
-        for (_, session) in sessions_writelock.iter_mut() {
-            let session_arc = Arc::clone(session);
-            let mut session: RwLockWriteGuard<Session> = session_arc.write().await;
-            
-            while let Some(message) = session.message_outbound.pop_front() {
-                let message_json =
-                    serde_json::to_string(&message).expect("Failed to serialize message");
-
-                let _ = &session
-                    .channel
-                    .send(Ok(warp::ws::Message::text(message_json)))
-                    .expect("Failed to send message");
+        // 3단계: 끊긴 세션 처리
+        let mut disconnected_sessions: Vec<u32> = Vec::new();
+        for (session_key, session) in sessions_writelock.iter() {
+            let session = session.read().await;
+            if !session.alive {
+                disconnected_sessions.push(*session_key);
             }
+        }
+        for session_key in disconnected_sessions.iter() {
+            Self::handle_disconnect(*session_key, &mut sessions_writelock).await;
         }
 
         drop(objects_writelock);
@@ -353,7 +457,6 @@ impl GameServer {
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
 
-        info!("listening to shutdown");
         tokio::select! {
             _ = ctrl_c => {
                 info!("Ctrl+C received, starting graceful shutdown");

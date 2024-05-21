@@ -1,16 +1,17 @@
+use log::LevelFilter::Debug;
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
+
 use core::server::GameServer;
 use std::net::SocketAddr;
-
-use log::LevelFilter::Debug;
-use log::*;
 
 use crate::core::args::{Args, Parser};
 
 mod core;
 mod handler;
-mod system;
 mod msg;
 mod object;
+mod system;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

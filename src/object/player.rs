@@ -1,3 +1,6 @@
+#[allow(unused_imports)]
+use log::{debug, error, info, warn};
+
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -6,7 +9,7 @@ use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use crate::core::session::Session;
 
-use super::base::{GameObject, GameObjectTrait};
+use super::base::{GameObject, GameObjectTrait, GameObjectUpdateResult};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PlayerGameObject {
@@ -42,10 +45,8 @@ impl GameObjectTrait for PlayerGameObject {
         sessions: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Session>>>>,
         objects: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Box<dyn GameObjectTrait>>>>>,
         delta_time: f32,
-    ) -> Result<(), String> {
-        
-
-        Ok(())
+    ) -> Result<GameObjectUpdateResult, String> {
+        Ok(GameObjectUpdateResult::SUCCESS)
     }
 
     fn get_alive(&self) -> bool {

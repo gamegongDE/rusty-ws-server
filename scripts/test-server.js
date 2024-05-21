@@ -9,14 +9,6 @@ ws.onopen = event => {
             message: 'hello'
         }
     }));
-
-    console.log('sending ready');
-    ws.send(JSON.stringify({
-        event: 'ready',
-        data: {
-            access_token: 'dev'
-        }
-    }));
 };
 
 ws.onmessage = event => {
