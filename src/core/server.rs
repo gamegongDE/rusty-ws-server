@@ -1,12 +1,12 @@
 #[allow(unused_imports)]
 use log::{debug, error, info, warn};
-use tungstenite::protocol;
 
 use crate::core::session::Session;
-use crate::handler::handler_echo::handle_echo;
+use crate::handler::handler_auth::handle_auth;
+use crate::handler::handler_ping::handle_ping;
 use crate::msg::msg_in::MsgIn;
 use crate::object::base::GameObjectTrait;
-use crate::system::map::GameMap;
+pub use clap::Parser;
 use futures::{join, FutureExt, SinkExt, StreamExt};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -25,38 +25,48 @@ pub type Sessions = HashMap<u32, Arc<RwLock<Session>>>;
 pub type SessionsArc = Arc<RwLock<Sessions>>;
 pub type GameObjects = HashMap<u32, Arc<RwLock<Box<dyn GameObjectTrait>>>>;
 pub type GameObjectsArc = Arc<RwLock<GameObjects>>;
-pub type GameMapArc = Arc<RwLock<GameMap>>;
+
+#[derive(Parser, Debug, Clone)]
+pub struct ServerArgs {
+    #[clap(default_value_t = 8333)]
+    pub port: u32,
+    #[clap(default_value_t = 0)]
+    pub msgpack: u32,
+}
 
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct GameServer {
+    server_args: ServerArgs,
+
     listen_address: SocketAddr,
     timestamp_server_start: u64,
     timestamp_server_end: u64,
     sessions: SessionsArc,
 
     game_objects: GameObjectsArc,
-    game_map: GameMapArc,
 
     next_session_key: Arc<AtomicU32>,
     next_object_key: u32,
 }
 
 impl GameServer {
-    pub async fn new(addr: SocketAddr) -> Result<Self, std::io::Error> {
-        let listen_address = addr;
+    pub async fn new(args: ServerArgs) -> Result<Self, std::io::Error> {
+        let addr = format!("0.0.0.0:{}", args.port);
+        let socket_addr = addr.parse::<SocketAddr>().expect("Can't parse address");
+
+        let listen_address = socket_addr;
         let sessions = Arc::new(RwLock::new(HashMap::new()));
         let game_objects = Arc::new(RwLock::new(HashMap::new()));
-        let game_map = Arc::new(RwLock::new(GameMap::new()));
         let next_session_key = Arc::new(AtomicU32::new(1000));
         let next_object_key = 1000000;
         Ok(Self {
+            server_args: args,
             listen_address,
             timestamp_server_start: 0,
             timestamp_server_end: 0,
             sessions,
             game_objects,
-            game_map,
             next_session_key,
             next_object_key,
         })
@@ -94,6 +104,7 @@ impl GameServer {
         // network task 를 생성합니다.
         let mut fps_receivers = Vec::new();
 
+        let use_msgpack = self.server_args.msgpack == 1;
         for i in 0..network_task_cnt {
             let copied_terminate_receiver = terminate_receiver.clone();
             let copied_sessions = self.sessions.clone();
@@ -108,6 +119,7 @@ impl GameServer {
                     worker_count,
                     copied_terminate_receiver,
                     fps_sender_task,
+                    use_msgpack,
                 )
                 .await;
             });
@@ -250,6 +262,7 @@ impl GameServer {
         worker_count: usize,
         terminate_receiver: watch::Receiver<bool>,
         fps_sender: watch::Sender<usize>,
+        use_msgpack: bool,
     ) {
         let mut last_fps_checked = tokio::time::Instant::now();
         let mut frame_count = 0;
@@ -282,20 +295,38 @@ impl GameServer {
                                 session.alive = false;
                                 break;
                             }
-                            if !message.is_text() {
-                                return;
-                            }
 
-                            let message_parse: Result<MsgIn, _> =
-                                serde_json::from_str(message.to_str().unwrap());
-                            if message_parse.is_err() {
-                                warn!("Message parse error : {}", message.to_str().unwrap());
-                                return;
-                            }
-                            let message = message_parse.unwrap();
-                            debug!("Message: {:?}", message);
+                            if use_msgpack {
+                                if !message.is_binary() {
+                                    return;
+                                }
 
-                            session.message_inbound.push_back(message);
+                                let data = message.into_bytes();
+                                let message_parse = rmp_serde::from_slice::<MsgIn>(&data);
+                                if message_parse.is_err() {
+                                    warn!("Message parse error : {:?}", data);
+                                    return;
+                                }
+                                let message = message_parse.unwrap();
+                                debug!("Message: {:?}", message);
+
+                                session.message_inbound.push_back(message);
+                            } else {
+                                if !message.is_text() {
+                                    return;
+                                }
+
+                                let message_parse: Result<MsgIn, _> =
+                                    serde_json::from_str(message.to_str().unwrap());
+                                if message_parse.is_err() {
+                                    warn!("Message parse error : {}", message.to_str().unwrap());
+                                    return;
+                                }
+                                let message = message_parse.unwrap();
+                                debug!("Message: {:?}", message);
+
+                                session.message_inbound.push_back(message);
+                            }
                         }
                         Err(err) => {
                             warn!("Error receiving message: {}", err);
@@ -305,18 +336,36 @@ impl GameServer {
                     }
                 }
 
-                let mut sending_messages = vec![];
-                for message in session.message_outbound.drain(..) {
-                    let message_json = serde_json::to_string(&message);
-                    if message_json.is_err() {
-                        warn!("Failed to serialize message: {:?}", message);
-                        continue;
+                if use_msgpack {
+                    let mut sending_messages = vec![];
+                    for message in session.message_outbound.drain(..) {
+                        let data = rmp_serde::to_vec(&message);
+                        if data.is_err() {
+                            warn!("Failed to serialize message: {:?}", message);
+                            continue;
+                        }
+                        let data_msgpack = data.unwrap();
+                        sending_messages.push(data_msgpack);
                     }
-                    sending_messages.push(message_json.unwrap());
-                }
 
-                for message in sending_messages.iter() {
-                    let _ = session.channel_send.send(Message::text(message)).await;
+                    for message in sending_messages.drain(..) {
+                        debug!("Message: {:?}", message);
+                        let _ = session.channel_send.send(Message::binary(message)).await;
+                    }
+                } else {
+                    let mut sending_messages = vec![];
+                    for message in session.message_outbound.drain(..) {
+                        let message_json = serde_json::to_string(&message);
+                        if message_json.is_err() {
+                            warn!("Failed to serialize message: {:?}", message);
+                            continue;
+                        }
+                        sending_messages.push(message_json.unwrap());
+                    }
+
+                    for message in sending_messages.drain(..) {
+                        let _ = session.channel_send.send(Message::text(message)).await;
+                    }
                 }
             }
 
@@ -356,14 +405,12 @@ impl GameServer {
         sessions_guard.remove(&session_key);
     }
 
-    async fn process_update(&self, delta_time: f32) {
+    async fn process_update(&mut self, delta_time: f32) {
         let mut sessions_writelock = self.sessions.write().await;
         let mut objects_writelock = self.game_objects.write().await;
 
         // 1단계: 메시지 수집
         let mut messages_to_process: HashMap<u32, Vec<MsgIn>> = HashMap::new();
-
-        // 클라이언트를 순회하며 살아있는 클라이언트의 메시지 처리
         for (session_key, session) in sessions_writelock.iter() {
             let mut session = session.write().await;
             while let Some(message) = session.message_inbound.pop_front() {
@@ -388,13 +435,48 @@ impl GameServer {
         }
 
         // 2단계: 게임 로직 처리
-        // state_writelock 의 game_objects 를 순회하면서 update 함수를 호출한다
-        for (_key, game_object) in objects_writelock.iter() {
+        let mut created_objects = Vec::new();
+        for (key, game_object) in objects_writelock.iter() {
             let mut write_lock = game_object.write().await;
 
-            let _result = write_lock
+            let update_result = write_lock
                 .update(&mut sessions_writelock, &objects_writelock, delta_time)
                 .await;
+
+            if update_result.is_err() {
+                let error_message = update_result.err().unwrap();
+                error!("Error updating object: #{}, {}", key, error_message);
+                continue;
+            }
+            let update_result = update_result.unwrap();
+            if !update_result.success {
+                error!("Error updating object: #{}", key);
+                continue;
+            }
+
+            let update_new_objects = update_result.new_objects;
+            if update_new_objects.is_some() {
+                created_objects.extend(update_new_objects.unwrap());
+            }
+        }
+
+        // 2-1단계: 새로운 오브젝트 생성
+        for new_object in created_objects.drain(..) {
+            let key = self.next_object_key;
+            self.next_object_key += 1;
+            objects_writelock.insert(key, new_object.clone());
+        }
+
+        // 2-2단계: 오브젝트 삭제
+        let mut deleted_objects = Vec::new();
+        for (key, game_object) in objects_writelock.iter() {
+            let game_object = game_object.read().await;
+            if !game_object.get_alive() {
+                deleted_objects.push(*key);
+            }
+        }
+        for key in deleted_objects.iter() {
+            objects_writelock.remove(key);
         }
 
         // 3단계: 끊긴 세션 처리
@@ -421,8 +503,23 @@ impl GameServer {
         mut objects_writelock: &mut tokio::sync::RwLockWriteGuard<'_, GameObjects>,
     ) {
         match message {
-            MsgIn::Echo(data) => {
-                let handle_result = handle_echo(
+            MsgIn::Ping(data) => {
+                let handle_result = handle_ping(
+                    &data,
+                    session_key,
+                    &mut sessions_writelock,
+                    &mut objects_writelock,
+                )
+                .await;
+                match handle_result {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Error handling message: {}", e);
+                    }
+                }
+            }
+            MsgIn::Auth(data) => {
+                let handle_result = handle_auth(
                     &data,
                     session_key,
                     &mut sessions_writelock,

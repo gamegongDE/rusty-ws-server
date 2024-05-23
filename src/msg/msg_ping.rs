@@ -1,11 +1,11 @@
 pub use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MsgInEchoData {
-    pub message: String,
+pub struct MsgInPingData {
+    pub timestamp: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MsgOutEchoData {
-    pub message: String,
+pub struct MsgOutPongData {
+    pub timestamp: u64,
 }

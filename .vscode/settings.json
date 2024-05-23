@@ -3,6 +3,7 @@
         "chrono",
         "cpus",
         "Deque",
+        "msgpack",
         "readlock",
         "writelock"
     ],
