@@ -1,8 +1,8 @@
 use tokio::sync::RwLockWriteGuard;
 
 use crate::core::server::{GameObjects, Sessions};
-use crate::msg::msg_auth::{MsgInAuthData, MsgOutAuthData};
-use crate::msg::msg_out::MsgOut;
+use crate::network_message::msg_auth::{MsgInAuthData, MsgOutAuthData};
+use crate::network_message::msg_out::MsgOut;
 
 #[allow(unused_variables)]
 pub async fn handle_auth(

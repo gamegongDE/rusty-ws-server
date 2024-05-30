@@ -2,10 +2,10 @@
 use log::{debug, error, info, warn};
 
 use crate::core::session::Session;
-use crate::handler::handler_auth::handle_auth;
-use crate::handler::handler_ping::handle_ping;
-use crate::msg::msg_in::MsgIn;
-use crate::object::base::GameObjectTrait;
+use crate::game_object::base::GameObjectTrait;
+use crate::network_handler::handler_auth::handle_auth;
+use crate::network_handler::handler_ping::handle_ping;
+use crate::network_message::msg_in::MsgIn;
 pub use clap::Parser;
 use futures::{join, FutureExt, SinkExt, StreamExt};
 use std::collections::VecDeque;

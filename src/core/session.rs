@@ -5,7 +5,7 @@ use log::{debug, error, info, warn};
 use std::{collections::VecDeque, net::SocketAddr};
 use warp::filters::ws::WebSocket;
 
-use crate::msg::{msg_in::MsgIn, msg_out::MsgOut};
+use crate::network_message::{msg_in::MsgIn, msg_out::MsgOut};
 
 #[allow(dead_code)]
 pub struct Session {

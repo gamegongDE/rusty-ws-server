@@ -1,8 +1,8 @@
 use tokio::sync::RwLockWriteGuard;
 
 use crate::core::server::{GameObjects, Sessions};
-use crate::msg::msg_out::MsgOut;
-use crate::msg::msg_ping::{MsgInPingData, MsgOutPongData};
+use crate::network_message::msg_out::MsgOut;
+use crate::network_message::msg_ping::{MsgInPingData, MsgOutPongData};
 
 #[allow(unused_variables)]
 pub async fn handle_ping(

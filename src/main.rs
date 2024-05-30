@@ -6,10 +6,10 @@ use log::{debug, error, info, warn};
 use core::server::{GameServer, ServerArgs};
 
 mod core;
-mod handler;
-mod msg;
-mod object;
-mod system;
+mod game_object;
+mod game_system;
+mod network_handler;
+mod network_message;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
