@@ -56,6 +56,7 @@ pub trait GameObjectTrait: Send + Sync {
         &mut self,
         sessions: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Session>>>>,
         objects: &RwLockWriteGuard<HashMap<u32, Arc<RwLock<Box<dyn GameObjectTrait>>>>>,
+        redis_client: &Option<fred::clients::RedisClient>,
         delta_time: f32,
     ) -> Result<GameObjectUpdateResult, String>;
     fn get_alive(&self) -> bool;
@@ -109,6 +110,7 @@ impl GameObjectTrait for GameObject {
             '_,
             HashMap<u32, Arc<tokio::sync::RwLock<Box<(dyn GameObjectTrait + 'static)>>>>,
         >,
+        redis_client: &Option<fred::clients::RedisClient>,
         delta_time: f32,
     ) -> Result<GameObjectUpdateResult, String> {
         Ok(GameObjectUpdateResult::SUCCESS)

@@ -1,3 +1,6 @@
+use fred::clients::RedisClient;
+use fred::prelude::*;
+use fred::types::{Builder, ReconnectPolicy, RedisConfig};
 #[allow(unused_imports)]
 use log::{debug, error, info, warn};
 
@@ -28,10 +31,12 @@ pub type GameObjectsArc = Arc<RwLock<GameObjects>>;
 
 #[derive(Parser, Debug, Clone)]
 pub struct ServerArgs {
-    #[clap(default_value_t = 8333)]
+    #[arg(long, default_value_t = 8333)]
     pub port: u32,
-    #[clap(default_value_t = 0)]
+    #[arg(long, default_value_t = 0)]
     pub msgpack: u32,
+    #[arg(long, default_value = "")]
+    pub redis: String,
 }
 
 #[allow(dead_code)]
@@ -40,6 +45,8 @@ pub(crate) struct GameServer {
     server_args: ServerArgs,
 
     listen_address: SocketAddr,
+    redis_client: Option<RedisClient>,
+
     timestamp_server_start: u64,
     timestamp_server_end: u64,
     sessions: SessionsArc,
@@ -63,6 +70,7 @@ impl GameServer {
         Ok(Self {
             server_args: args,
             listen_address,
+            redis_client: None,
             timestamp_server_start: 0,
             timestamp_server_end: 0,
             sessions,
@@ -96,9 +104,10 @@ impl GameServer {
         info!("Network task count: {}", network_task_cnt);
 
         let (terminate_sender, terminate_receiver) = watch::channel(false);
+        let copied_terminate_sender = terminate_sender.clone();
         // shutdown_signal 태스크를 생성합니다.
         let _ = tokio::spawn(async {
-            Self::shutdown_signal(terminate_sender).await;
+            Self::shutdown_signal(copied_terminate_sender).await;
         });
 
         // network task 를 생성합니다.
@@ -161,6 +170,52 @@ impl GameServer {
 
         // 웹소켓 서버를 시작합니다.
         let tokio_server_handler = tokio::spawn(server);
+
+        // Redis 클라이언트를 초기화합니다.
+        if !self.server_args.redis.is_empty() {
+            let copied_terminate_sender = terminate_sender.clone();
+            let redis_url = {
+                let redis_url = self.server_args.redis.as_str();
+                if !redis_url.starts_with("redis") {
+                    format!("redis://{}", redis_url)
+                } else {
+                    redis_url.to_string()
+                }
+            };
+            let redis_config_generated = RedisConfig::from_url(&redis_url);
+            if redis_config_generated.is_err() {
+                error!(
+                    "redis: redis config creation error : {:?}",
+                    redis_config_generated.err()
+                );
+                copied_terminate_sender.send(true).unwrap();
+                return Err("redis config creation error".to_string());
+            }
+            let redis_config = redis_config_generated.unwrap();
+            let redis_client = Builder::from_config(redis_config)
+                .set_policy(ReconnectPolicy::new_linear(0, 10000, 1000))
+                .build();
+            if redis_client.is_err() {
+                error!(
+                    "redis: redis client creation error : {:?}",
+                    redis_client.err()
+                );
+                copied_terminate_sender.send(true).unwrap();
+                return Err("redis client creation error".to_string());
+            }
+
+            let redis_client = redis_client.unwrap();
+            let redis_init_result = redis_client.init().await;
+            if redis_init_result.is_err() {
+                error!(
+                    "redis: redis client init error : {:?}",
+                    redis_init_result.err()
+                );
+                copied_terminate_sender.send(true).unwrap();
+                return Err("redis client init error".to_string());
+            }
+            self.redis_client = Some(redis_client.clone());
+        }
 
         // 로직 루프를 실행합니다.
         let mut last_update = tokio::time::Instant::now();
@@ -436,11 +491,17 @@ impl GameServer {
 
         // 2단계: 게임 로직 처리
         let mut created_objects = Vec::new();
+        let cloned_redis_client = self.redis_client.clone();
         for (key, game_object) in objects_writelock.iter() {
             let mut write_lock = game_object.write().await;
 
             let update_result = write_lock
-                .update(&mut sessions_writelock, &objects_writelock, delta_time)
+                .update(
+                    &mut sessions_writelock,
+                    &objects_writelock,
+                    &cloned_redis_client,
+                    delta_time,
+                )
                 .await;
 
             if update_result.is_err() {
@@ -509,6 +570,7 @@ impl GameServer {
                     session_key,
                     &mut sessions_writelock,
                     &mut objects_writelock,
+                    self.redis_client.clone(),
                 )
                 .await;
                 match handle_result {
@@ -524,6 +586,7 @@ impl GameServer {
                     session_key,
                     &mut sessions_writelock,
                     &mut objects_writelock,
+                    self.redis_client.clone(),
                 )
                 .await;
                 match handle_result {
